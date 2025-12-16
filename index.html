@@ -2838,10 +2838,23 @@
                 pc.ontrack = (e) => {
                     remoteStreamRef.current = e.streams[0];
                     try {
-                        const url = URL.createObjectURL(e.streams[0]);
-                        setRemoteAudioUrl(url);
+                        // If our audio element is available, attach the stream directly for reliable playback
+                        if (audioRef && audioRef.current && 'srcObject' in audioRef.current) {
+                            try {
+                                audioRef.current.srcObject = e.streams[0];
+                                audioRef.current.muted = false;
+                                audioRef.current.play().catch(() => {});
+                            } catch (innerErr) {
+                                console.warn('Failed to attach stream via srcObject, falling back to object URL', innerErr);
+                                const url = URL.createObjectURL(e.streams[0]);
+                                setRemoteAudioUrl(url);
+                            }
+                        } else {
+                            const url = URL.createObjectURL(e.streams[0]);
+                            setRemoteAudioUrl(url);
+                        }
                     } catch (err) {
-                        console.warn('Could not create object URL for remote stream', err);
+                        console.warn('Could not attach remote stream to audio', err);
                     }
                 };
 
