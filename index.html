@@ -1066,6 +1066,55 @@
             );
         }
 
+        // In-call UI (visible during call)
+        function CallModal({ isCalling, isInCall, targetUser, onHangup, onToggleMute, muted, audioRef, remoteStreamRef, remoteAudioUrl }) {
+            useEffect(() => {
+                if (!audioRef || !audioRef.current) return;
+                // prefer using srcObject when remote stream is available
+                try {
+                    if (remoteStreamRef && remoteStreamRef.current && 'srcObject' in audioRef.current) {
+                        audioRef.current.srcObject = remoteStreamRef.current;
+                    } else if (remoteAudioUrl) {
+                        audioRef.current.src = remoteAudioUrl;
+                    }
+                    audioRef.current.autoplay = true;
+                    audioRef.current.play().catch(() => {});
+                } catch (e) {
+                    console.warn('Failed to attach remote audio to element', e);
+                }
+            }, [remoteAudioUrl, isInCall, isCalling, audioRef, remoteStreamRef]);
+
+            if (!isCalling && !isInCall) return null;
+
+            return (
+                <div className="fixed inset-0 z-70 bg-black/30 flex items-center justify-center" onClick={() => {}}>
+                    <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center space-x-3">
+                                <img src={targetUser?.avatar} alt="avatar" className="w-12 h-12 rounded-full bg-slate-100" />
+                                <div>
+                                    <div className="font-semibold">{targetUser?.name || 'Calling...'}</div>
+                                    <div className="text-xs text-slate-500">{isCalling ? 'Calling...' : 'In call'}</div>
+                                </div>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                                <button onClick={() => { onToggleMute && onToggleMute(); }} className="px-3 py-2 bg-slate-100 rounded-lg">
+                                    {muted ? 'Unmute' : 'Mute'}
+                                </button>
+                                <button onClick={() => { onHangup && onHangup(); }} className="px-3 py-2 bg-rose-600 text-white rounded-lg">Hang Up</button>
+                            </div>
+                        </div>
+
+                        <div className="mb-4">
+                            <audio ref={audioRef} controls className="w-full" />
+                        </div>
+
+                        <div className="text-xs text-slate-500">Microphone access is required. Allow the browser prompt if shown.</div>
+                    </div>
+                </div>
+            );
+        }
+
         // Modal to manage project access (admin only)
         function ManageAccessModal({ isOpen, onClose, project, users, onSave }) {
             const [selectedIds, setSelectedIds] = useState(() => {
@@ -2442,14 +2491,18 @@
             const [manageAccessProject, setManageAccessProject] = useState(null);
             const [isManageAccessOpen, setIsManageAccessOpen] = useState(false);
             // WebRTC / Calls
-            const [callChannel, setCallChannel] = useState(null);
-            const [incomingCall, setIncomingCall] = useState(null);
-            const [isCalling, setIsCalling] = useState(false);
-            const [isInCall, setIsInCall] = useState(false);
-            const pcRef = useRef(null);
-            const localStreamRef = useRef(null);
-            const remoteStreamRef = useRef(null);
-            const [remoteAudioUrl, setRemoteAudioUrl] = useState(null);
+                const [callChannel, setCallChannel] = useState(null);
+                const [incomingCall, setIncomingCall] = useState(null);
+                const [isCalling, setIsCalling] = useState(false);
+                const [isInCall, setIsInCall] = useState(false);
+                const pcRef = useRef(null);
+                const localStreamRef = useRef(null);
+                const remoteStreamRef = useRef(null);
+                const [remoteAudioUrl, setRemoteAudioUrl] = useState(null);
+                const [callTargetId, setCallTargetId] = useState(null);
+                const [currentCallId, setCurrentCallId] = useState(null);
+                const audioRef = useRef(null);
+                const [muted, setMuted] = useState(false);
 
             // Restore session from localStorage on mount (before loading data)
             useEffect(() => {
@@ -2809,6 +2862,8 @@
                     await pcRef.current.setLocalDescription(offer);
 
                     const callId = `call-${Date.now()}`;
+                    setCallTargetId(targetId);
+                    setCurrentCallId(callId);
                     await sendSignal({ type: 'offer', offer: offer, from: currentUser.id, fromName: currentUser.name, target: targetId, callId });
                     setIsInCall(true);
                 } catch (e) {
@@ -2831,6 +2886,8 @@
                     const answer = await pcRef.current.createAnswer();
                     await pcRef.current.setLocalDescription(answer);
 
+                    setCallTargetId(from);
+                    setCurrentCallId(callId);
                     await sendSignal({ type: 'answer', answer: answer, from: currentUser.id, fromName: currentUser.name, target: from, callId });
                     setIsInCall(true);
                     setIncomingCall(null);
@@ -2850,6 +2907,10 @@
 
             const endCallLocal = () => {
                 try {
+                    // notify remote party
+                    if (callTargetId) {
+                        try { sendSignal({ type: 'hangup', from: currentUser.id, target: callTargetId, callId: currentCallId }); } catch(e){}
+                    }
                     if (pcRef.current) {
                         pcRef.current.close();
                         pcRef.current = null;
@@ -2867,9 +2928,23 @@
                     console.warn('Error ending call', e);
                 }
                 setRemoteAudioUrl(null);
+                setCallTargetId(null);
+                setCurrentCallId(null);
+                setMuted(false);
                 setIsInCall(false);
                 setIsCalling(false);
                 setIncomingCall(null);
+            };
+
+            const toggleMute = () => {
+                try {
+                    if (!localStreamRef.current) return;
+                    const newMuted = !muted;
+                    localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !newMuted);
+                    setMuted(newMuted);
+                } catch (e) {
+                    console.warn('Failed to toggle mute', e);
+                }
             };
 
             const canAccessProject = (user, projectId, level = 'read') => {
@@ -3802,10 +3877,18 @@
                         />
                     )}
 
-                    {/* Remote audio element (hidden) */}
-                    {remoteAudioUrl && (
-                        <audio src={remoteAudioUrl} autoPlay className="hidden" />
-                    )}
+                    {/* Call UI / Remote audio element */}
+                    <CallModal
+                        isCalling={isCalling}
+                        isInCall={isInCall}
+                        targetUser={allUsers.find(u => u.id === callTargetId)}
+                        onHangup={endCallLocal}
+                        onToggleMute={toggleMute}
+                        muted={muted}
+                        audioRef={audioRef}
+                        remoteStreamRef={remoteStreamRef}
+                        remoteAudioUrl={remoteAudioUrl}
+                    />
                     {isAvatarModalOpen && (
                         <AvatarModal
                             isOpen={isAvatarModalOpen}
